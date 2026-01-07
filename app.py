@@ -26,7 +26,8 @@ Units expected:
 def process_etabs_file(uploaded_file):
     sheet_names = [
         "Joint Reactions",
-        "Objects and Elements - Joints"
+        "Objects and Elements - Joints",
+        "Footing Sizes"   # 👈 NEW
     ]
 
     dataframes = pd.read_excel(
@@ -35,32 +36,27 @@ def process_etabs_file(uploaded_file):
         skiprows=1
     )
 
-    # Joint Reactions
     loads_df = dataframes["Joint Reactions"].dropna(
         subset=["Unique Name", "Output Case"]
     ).copy()
 
-    # Joint Coordinates
     coords_df = dataframes["Objects and Elements - Joints"].dropna(
-        subset=["Element Name", "Object Name", "Global X", "Global Y", "Global Z"]
+        subset=["Element Name", "Object Name", "Global X", "Global Y"]
     ).copy()
 
     coords_df = coords_df.rename(columns={
         "Object Name": "Unique Name"
     })
 
-    # Load combinations
-    load_combos = loads_df["Output Case"].unique().tolist()
+    footing_df = dataframes["Footing Sizes"].copy()
 
-    # Merge
-    merged_df = pd.merge(
-        loads_df,
-        coords_df,
-        on="Unique Name",
-        how="inner"
-    )
+    merged_df = loads_df.merge(coords_df, on="Unique Name")
+    merged_df = merged_df.merge(footing_df, on="Unique Name", how="left")
+
+    load_combos = merged_df["Output Case"].unique().tolist()
 
     return load_combos, merged_df.reset_index(drop=True)
+
 
 
 # -------------------------------
