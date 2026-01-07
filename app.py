@@ -2,69 +2,26 @@ import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
 
+# -------------------------------
+# PAGE SETUP
+# -------------------------------
 st.set_page_config(
-    page_title="ETABS Reaction Heatmap",
+    page_title="ETABS Footing Reaction Heatmap",
     layout="wide"
 )
 
-st.title("ETABS Reaction Heatmap (Streamlit)")
+st.title("ETABS Footing Reaction Heatmap")
 st.markdown("""
-This app allows you to inspect results from an uploaded ETABS output file.
+Upload an ETABS exported Excel file and visualize  
+**footing reactions with actual footing size (L × B)**.
 
-**Required Excel sheets:**
-- Joint Reactions
-- Objects and Elements - Joints
-
-Units expected:
-- Loads: **kN**
+Units assumed:
 - Coordinates: **mm**
+- Reactions: **kN**
 """)
 
 # -------------------------------
-# PROCESS ETABS FILE (same logic)
-# -------------------------------
-def process_etabs_file(uploaded_file):
-    sheet_names = [
-        "Joint Reactions",
-        "Objects and Elements - Joints"
-    ]
-
-    dataframes = pd.read_excel(
-        uploaded_file,
-        sheet_name=sheet_names,
-        skiprows=1
-    )
-
-    # Joint Reactions
-    loads_df = dataframes["Joint Reactions"].dropna(
-        subset=["Unique Name", "Output Case"]
-    ).copy()
-
-    # Joint Coordinates
-    coords_df = dataframes["Objects and Elements - Joints"].dropna(
-        subset=["Element Name", "Object Name", "Global X", "Global Y", "Global Z"]
-    ).copy()
-
-    coords_df = coords_df.rename(columns={
-        "Object Name": "Unique Name"
-    })
-
-    # Load combinations
-    load_combos = loads_df["Output Case"].unique().tolist()
-
-    # Merge
-    merged_df = pd.merge(
-        loads_df,
-        coords_df,
-        on="Unique Name",
-        how="inner"
-    )
-
-    return load_combos, merged_df.reset_index(drop=True)
-
-
-# -------------------------------
-# FILE UPLOAD (FileField)
+# FILE UPLOAD
 # -------------------------------
 uploaded_file = st.file_uploader(
     "Upload ETABS exported .xlsx",
@@ -72,76 +29,195 @@ uploaded_file = st.file_uploader(
 )
 
 if uploaded_file:
-    try:
-        load_combos, merged_df = process_etabs_file(uploaded_file)
 
-        # -------------------------------
-        # LOAD COMBO SELECT (OptionField)
-        # -------------------------------
-        selected_load_combo = st.selectbox(
-            "Select available load combinations",
+    # -------------------------------
+    # SHEET MAPPING (USER CONTROL)
+    # -------------------------------
+    xls = pd.ExcelFile(uploaded_file)
+    available_sheets = xls.sheet_names
+
+    st.subheader("Map ETABS Excel Sheets")
+
+    joint_reaction_sheet = st.selectbox(
+        "Joint Reactions sheet (contains FZ)",
+        available_sheets
+    )
+
+    joint_coord_sheet = st.selectbox(
+        "Joint Coordinates sheet (Global X, Y)",
+        available_sheets
+    )
+
+    area_sheet = st.selectbox(
+        "Footing / Area sheet (corner joints of footing)",
+        available_sheets
+    )
+
+    # -------------------------------
+    # PROCESS FUNCTION
+    # -------------------------------
+    def process_etabs_file(
+        uploaded_file,
+        joint_reaction_sheet,
+        joint_coord_sheet,
+        area_sheet
+    ):
+        dfs = pd.read_excel(
+            uploaded_file,
+            sheet_name=[
+                joint_reaction_sheet,
+                joint_coord_sheet,
+                area_sheet
+            ],
+            skiprows=1
+        )
+
+        # -------- Joint reactions --------
+        loads_df = dfs[joint_reaction_sheet].dropna(
+            subset=["Unique Name", "Output Case", "FZ"]
+        ).copy()
+
+        # -------- Joint coordinates --------
+        joints_df = dfs[joint_coord_sheet].dropna(
+            subset=["Object Name", "Global X", "Global Y"]
+        ).copy()
+
+        joints_df = joints_df.rename(
+            columns={"Object Name": "Joint"}
+        )
+
+        # -------- Footing (Area) geometry --------
+        areas_df = dfs[area_sheet].dropna(
+            subset=["Object Name", "Joint", "Global X", "Global Y"]
+        ).copy()
+
+        # Compute rectangle from corner joints
+        footing_geom = (
+            areas_df
+            .groupby("Object Name")
+            .agg(
+                Xmin=("Global X", "min"),
+                Xmax=("Global X", "max"),
+                Ymin=("Global Y", "min"),
+                Ymax=("Global Y", "max")
+            )
+            .reset_index()
+            .rename(columns={"Object Name": "Footing"})
+        )
+
+        # Center & size
+        footing_geom["Xc"] = (footing_geom["Xmin"] + footing_geom["Xmax"]) / 2
+        footing_geom["Yc"] = (footing_geom["Ymin"] + footing_geom["Ymax"]) / 2
+        footing_geom["L"] = (footing_geom["Xmax"] - footing_geom["Xmin"]) / 1000
+        footing_geom["B"] = (footing_geom["Ymax"] - footing_geom["Ymin"]) / 1000
+
+        # -------- Merge reactions with joints --------
+        merged = pd.merge(
+            loads_df,
+            joints_df,
+            left_on="Unique Name",
+            right_on="Joint",
+            how="inner"
+        )
+
+        # Map each joint to nearest footing
+        def nearest_footing(x, y):
+            d = (footing_geom["Xc"] - x) ** 2 + (footing_geom["Yc"] - y) ** 2
+            return footing_geom.loc[d.idxmin()]
+
+        footing_rows = merged.apply(
+            lambda r: nearest_footing(r["Global X"], r["Global Y"]),
+            axis=1
+        )
+
+        final_df = pd.concat(
+            [merged.reset_index(drop=True),
+             footing_rows.reset_index(drop=True)],
+            axis=1
+        )
+
+        load_combos = final_df["Output Case"].unique().tolist()
+
+        return load_combos, final_df
+
+    # -------------------------------
+    # RUN PROCESSING
+    # -------------------------------
+    try:
+        load_combos, data = process_etabs_file(
+            uploaded_file,
+            joint_reaction_sheet,
+            joint_coord_sheet,
+            area_sheet
+        )
+
+        selected_combo = st.selectbox(
+            "Select Load Combination",
             load_combos
         )
 
-        if selected_load_combo:
-            filtered_df = merged_df[
-                merged_df["Output Case"] == selected_load_combo
-            ]
+        df = data[data["Output Case"] == selected_combo]
 
-            FZ_min = filtered_df["FZ"].min()
-            FZ_max = filtered_df["FZ"].max()
+        # -------------------------------
+        # PLOT
+        # -------------------------------
+        fig = go.Figure()
 
-            # -------------------------------
-            # PLOTLY HEATMAP (same as VIKTOR)
-            # -------------------------------
-            fig = go.Figure(
-                data=go.Scatter(
-                    x=filtered_df["Global X"],
-                    y=filtered_df["Global Y"],
-                    mode="markers+text",
-                    marker=dict(
-                        size=16,
-                        color=filtered_df["FZ"],
-                        colorscale=[
-                            [0, "green"],
-                            [0.5, "yellow"],
-                            [1, "red"]
-                        ],
-                        colorbar=dict(title="FZ (kN)"),
-                        cmin=FZ_min,
-                        cmax=FZ_max
-                    ),
-                    text=[f"{fz:.1f}" for fz in filtered_df["FZ"]],
-                    textposition="top right"
-                )
+        # Draw footing rectangles
+        for _, r in df.iterrows():
+            fig.add_shape(
+                type="rect",
+                x0=r["Xmin"],
+                x1=r["Xmax"],
+                y0=r["Ymin"],
+                y1=r["Ymax"],
+                fillcolor="lightgrey",
+                line=dict(color="black", width=1),
+                opacity=0.8
             )
 
-            fig.update_layout(
-                title=f"Heatmap for Output Case: {selected_load_combo}",
-                xaxis_title="X (m)",
-                yaxis_title="Y (m)",
-                plot_bgcolor="rgba(0,0,0,0)"
+        # Text at center
+        fig.add_trace(
+            go.Scatter(
+                x=df["Xc"],
+                y=df["Yc"],
+                mode="text",
+                text=[
+                    f"{r['FZ']:.1f} kN<br>{r['L']:.1f} × {r['B']:.1f} m"
+                    for _, r in df.iterrows()
+                ],
+                textposition="middle center"
             )
+        )
 
-            fig.update_xaxes(
-                linecolor="LightGrey",
-                ticktext=[f"{x/1000:.3f}" for x in filtered_df["Global X"]],
-                tickvals=filtered_df["Global X"]
+        fig.update_layout(
+            title=f"Footing Reactions – {selected_combo}",
+            xaxis_title="Global X (mm)",
+            yaxis_title="Global Y (mm)",
+            plot_bgcolor="white",
+            xaxis=dict(scaleanchor="y", scaleratio=1)
+        )
+
+        st.plotly_chart(fig, use_container_width=True)
+
+        # -------------------------------
+        # TABLE
+        # -------------------------------
+        with st.expander("Show Footing Data Table"):
+            st.dataframe(
+                df[
+                    [
+                        "Footing",
+                        "L",
+                        "B",
+                        "FZ",
+                        "Output Case"
+                    ]
+                ]
             )
-
-            fig.update_yaxes(
-                linecolor="LightGrey",
-                ticktext=[f"{y/1000:.3f}" for y in filtered_df["Global Y"]],
-                tickvals=filtered_df["Global Y"]
-            )
-
-            st.plotly_chart(fig, use_container_width=True)
-
-            # Optional data preview
-            with st.expander("Show processed data"):
-                st.dataframe(filtered_df)
 
     except Exception as e:
         st.error(f"Error processing file: {e}")
+
 else:
-    st.info("Please upload an ETABS exported Excel file to begin.")
+    st.info("Upload an ETABS Excel file to begin.")
