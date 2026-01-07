@@ -2,37 +2,158 @@ import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
 
-# -------------------------------
+# -------------------------------------------------
 # PAGE SETUP
-# -------------------------------
+# -------------------------------------------------
 st.set_page_config(
-    page_title="ETABS Footing Reaction Heatmap",
+    page_title="ETABS Footing Reaction Heatmapsss",
     layout="wide"
 )
 
 st.title("ETABS Footing Reaction Heatmap")
 st.markdown("""
-Upload an ETABS exported Excel file and visualize  
-**footing reactions with actual footing size (L × B)**.
+This app visualizes **footing reactions with actual footing size (L × B)**  
+similar to ETABS / VIKTOR output.
 
-Units assumed:
+**Units assumed**
 - Coordinates: **mm**
 - Reactions: **kN**
 """)
 
-# -------------------------------
+# -------------------------------------------------
 # FILE UPLOAD
-# -------------------------------
+# -------------------------------------------------
 uploaded_file = st.file_uploader(
     "Upload ETABS exported .xlsx",
     type=["xlsx"]
 )
 
+# -------------------------------------------------
+# HELPER: VALIDATE REQUIRED COLUMNS
+# -------------------------------------------------
+def validate_columns(df, required_cols, sheet_label):
+    missing = [c for c in required_cols if c not in df.columns]
+    if missing:
+        raise ValueError(
+            f"Wrong sheet selected for **{sheet_label}**.\n\n"
+            f"Missing columns: {missing}\n\n"
+            f"Please select the correct ETABS sheet."
+        )
+
+# -------------------------------------------------
+# PROCESS FUNCTION
+# -------------------------------------------------
+def process_etabs_file(
+    uploaded_file,
+    joint_reaction_sheet,
+    joint_coord_sheet,
+    area_sheet
+):
+    dfs = pd.read_excel(
+        uploaded_file,
+        sheet_name=[
+            joint_reaction_sheet,
+            joint_coord_sheet,
+            area_sheet
+        ],
+        skiprows=1
+    )
+
+    # ---------------- Joint Reactions ----------------
+    loads_raw = dfs[joint_reaction_sheet]
+    validate_columns(
+        loads_raw,
+        ["Unique Name", "Output Case", "FZ"],
+        "Joint Reactions"
+    )
+
+    loads_df = loads_raw.dropna(
+        subset=["Unique Name", "Output Case", "FZ"]
+    ).copy()
+
+    # ---------------- Joint Coordinates ----------------
+    joints_raw = dfs[joint_coord_sheet]
+    validate_columns(
+        joints_raw,
+        ["Object Name", "Global X", "Global Y"],
+        "Joint Coordinates"
+    )
+
+    joints_df = joints_raw.dropna(
+        subset=["Object Name", "Global X", "Global Y"]
+    ).copy()
+
+    joints_df = joints_df.rename(
+        columns={"Object Name": "Joint"}
+    )
+
+    # ---------------- Footing / Area Geometry ----------------
+    areas_raw = dfs[area_sheet]
+    validate_columns(
+        areas_raw,
+        ["Object Name", "Joint", "Global X", "Global Y"],
+        "Footing / Area"
+    )
+
+    areas_df = areas_raw.dropna(
+        subset=["Object Name", "Joint", "Global X", "Global Y"]
+    ).copy()
+
+    # Compute footing rectangle from corner joints
+    footing_geom = (
+        areas_df
+        .groupby("Object Name")
+        .agg(
+            Xmin=("Global X", "min"),
+            Xmax=("Global X", "max"),
+            Ymin=("Global Y", "min"),
+            Ymax=("Global Y", "max")
+        )
+        .reset_index()
+        .rename(columns={"Object Name": "Footing"})
+    )
+
+    # Center & size
+    footing_geom["Xc"] = (footing_geom["Xmin"] + footing_geom["Xmax"]) / 2
+    footing_geom["Yc"] = (footing_geom["Ymin"] + footing_geom["Ymax"]) / 2
+    footing_geom["L"] = (footing_geom["Xmax"] - footing_geom["Xmin"]) / 1000
+    footing_geom["B"] = (footing_geom["Ymax"] - footing_geom["Ymin"]) / 1000
+
+    # ---------------- Merge reactions with joints ----------------
+    merged = pd.merge(
+        loads_df,
+        joints_df,
+        left_on="Unique Name",
+        right_on="Joint",
+        how="inner"
+    )
+
+    # Map each joint to nearest footing
+    def nearest_footing(x, y):
+        d = (footing_geom["Xc"] - x) ** 2 + (footing_geom["Yc"] - y) ** 2
+        return footing_geom.loc[d.idxmin()]
+
+    footing_rows = merged.apply(
+        lambda r: nearest_footing(r["Global X"], r["Global Y"]),
+        axis=1
+    )
+
+    final_df = pd.concat(
+        [
+            merged.reset_index(drop=True),
+            footing_rows.reset_index(drop=True)
+        ],
+        axis=1
+    )
+
+    load_combos = final_df["Output Case"].unique().tolist()
+    return load_combos, final_df
+
+# -------------------------------------------------
+# MAIN LOGIC
+# -------------------------------------------------
 if uploaded_file:
 
-    # -------------------------------
-    # SHEET MAPPING (USER CONTROL)
-    # -------------------------------
     xls = pd.ExcelFile(uploaded_file)
     available_sheets = xls.sheet_names
 
@@ -53,96 +174,15 @@ if uploaded_file:
         available_sheets
     )
 
-    # -------------------------------
-    # PROCESS FUNCTION
-    # -------------------------------
-    def process_etabs_file(
-        uploaded_file,
-        joint_reaction_sheet,
-        joint_coord_sheet,
-        area_sheet
-    ):
-        dfs = pd.read_excel(
-            uploaded_file,
-            sheet_name=[
-                joint_reaction_sheet,
-                joint_coord_sheet,
-                area_sheet
-            ],
-            skiprows=1
-        )
+    st.info("""
+**Tip for clients**
+- Joint Reactions → usually named *Joint Reactions*
+- Joint Coordinates → *Objects and Elements – Joints*
+- Footings → *Objects and Elements – Areas*
 
-        # -------- Joint reactions --------
-        loads_df = dfs[joint_reaction_sheet].dropna(
-            subset=["Unique Name", "Output Case", "FZ"]
-        ).copy()
+Do **not** select *Analysis Messages*.
+""")
 
-        # -------- Joint coordinates --------
-        joints_df = dfs[joint_coord_sheet].dropna(
-            subset=["Object Name", "Global X", "Global Y"]
-        ).copy()
-
-        joints_df = joints_df.rename(
-            columns={"Object Name": "Joint"}
-        )
-
-        # -------- Footing (Area) geometry --------
-        areas_df = dfs[area_sheet].dropna(
-            subset=["Object Name", "Joint", "Global X", "Global Y"]
-        ).copy()
-
-        # Compute rectangle from corner joints
-        footing_geom = (
-            areas_df
-            .groupby("Object Name")
-            .agg(
-                Xmin=("Global X", "min"),
-                Xmax=("Global X", "max"),
-                Ymin=("Global Y", "min"),
-                Ymax=("Global Y", "max")
-            )
-            .reset_index()
-            .rename(columns={"Object Name": "Footing"})
-        )
-
-        # Center & size
-        footing_geom["Xc"] = (footing_geom["Xmin"] + footing_geom["Xmax"]) / 2
-        footing_geom["Yc"] = (footing_geom["Ymin"] + footing_geom["Ymax"]) / 2
-        footing_geom["L"] = (footing_geom["Xmax"] - footing_geom["Xmin"]) / 1000
-        footing_geom["B"] = (footing_geom["Ymax"] - footing_geom["Ymin"]) / 1000
-
-        # -------- Merge reactions with joints --------
-        merged = pd.merge(
-            loads_df,
-            joints_df,
-            left_on="Unique Name",
-            right_on="Joint",
-            how="inner"
-        )
-
-        # Map each joint to nearest footing
-        def nearest_footing(x, y):
-            d = (footing_geom["Xc"] - x) ** 2 + (footing_geom["Yc"] - y) ** 2
-            return footing_geom.loc[d.idxmin()]
-
-        footing_rows = merged.apply(
-            lambda r: nearest_footing(r["Global X"], r["Global Y"]),
-            axis=1
-        )
-
-        final_df = pd.concat(
-            [merged.reset_index(drop=True),
-             footing_rows.reset_index(drop=True)],
-            axis=1
-        )
-
-        load_combos = final_df["Output Case"].unique().tolist()
-
-        return load_combos, final_df
-
-    # -------------------------------
-    # RUN PROCESSING
-    # -------------------------------
     try:
         load_combos, data = process_etabs_file(
             uploaded_file,
@@ -158,9 +198,9 @@ if uploaded_file:
 
         df = data[data["Output Case"] == selected_combo]
 
-        # -------------------------------
+        # -------------------------------------------------
         # PLOT
-        # -------------------------------
+        # -------------------------------------------------
         fig = go.Figure()
 
         # Draw footing rectangles
@@ -176,14 +216,14 @@ if uploaded_file:
                 opacity=0.8
             )
 
-        # Text at center
+        # Text at footing center
         fig.add_trace(
             go.Scatter(
                 x=df["Xc"],
                 y=df["Yc"],
                 mode="text",
                 text=[
-                    f"{r['FZ']:.1f} kN<br>{r['L']:.1f} × {r['B']:.1f} m"
+                    f"{r['FZ']:.1f} kN<br>{r['L']:.2f} × {r['B']:.2f} m"
                     for _, r in df.iterrows()
                 ],
                 textposition="middle center"
@@ -200,9 +240,9 @@ if uploaded_file:
 
         st.plotly_chart(fig, use_container_width=True)
 
-        # -------------------------------
+        # -------------------------------------------------
         # TABLE
-        # -------------------------------
+        # -------------------------------------------------
         with st.expander("Show Footing Data Table"):
             st.dataframe(
                 df[
@@ -217,7 +257,7 @@ if uploaded_file:
             )
 
     except Exception as e:
-        st.error(f"Error processing file: {e}")
+        st.error(str(e))
 
 else:
     st.info("Upload an ETABS Excel file to begin.")
