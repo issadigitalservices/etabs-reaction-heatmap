@@ -2,23 +2,23 @@ import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
 
-# ---------------------------------
+# -------------------------------------------------
 # PAGE CONFIG
-# ---------------------------------
+# -------------------------------------------------
 st.set_page_config(
-    page_title="ETABS Reaction Heatmap",
+    page_title="aaaETABS Reaction Heatmap",
     layout="wide"
 )
 
 st.title("ETABS Reaction Heatmap (Streamlit)")
 st.markdown("""
-This app allows you to inspect results from an uploaded ETABS output file.
+This app visualizes ETABS joint reactions as **footing blocks (rectangles)**.
 
 **Required Excel sheets:**
 - Joint Reactions
 - Objects and Elements - Joints
 
-**Optional Excel sheet (for footing visualization):**
+**Optional Excel sheet:**
 - Footing Sizes
 
 **Units expected:**
@@ -27,9 +27,15 @@ This app allows you to inspect results from an uploaded ETABS output file.
 - Footing sizes: **mm**
 """)
 
-# ---------------------------------
+# -------------------------------------------------
+# DEFAULT FOOTING SIZE (used if not provided)
+# -------------------------------------------------
+DEFAULT_FOOTING_L = 1500  # mm
+DEFAULT_FOOTING_B = 1500  # mm
+
+# -------------------------------------------------
 # PROCESS ETABS FILE
-# ---------------------------------
+# -------------------------------------------------
 def process_etabs_file(uploaded_file):
     xls = pd.ExcelFile(uploaded_file)
     available_sheets = xls.sheet_names
@@ -75,9 +81,9 @@ def process_etabs_file(uploaded_file):
 
     return load_combos, merged_df.reset_index(drop=True), footing_available
 
-# ---------------------------------
+# -------------------------------------------------
 # FILE UPLOAD
-# ---------------------------------
+# -------------------------------------------------
 uploaded_file = st.file_uploader(
     "Upload ETABS exported .xlsx",
     type=["xlsx"]
@@ -87,9 +93,6 @@ if uploaded_file:
     try:
         load_combos, merged_df, footing_available = process_etabs_file(uploaded_file)
 
-        # ---------------------------------
-        # LOAD COMBINATION SELECTION
-        # ---------------------------------
         selected_load_combo = st.selectbox(
             "Select available load combinations",
             load_combos
@@ -100,16 +103,13 @@ if uploaded_file:
                 merged_df["Output Case"] == selected_load_combo
             ]
 
-            if not footing_available:
-                st.warning(
-                    "⚠ 'Footing Sizes' sheet not found. "
-                    "Showing joint reactions only."
-                )
+          
 
-            # ---------------------------------
-            # PLOTTING
-            # ---------------------------------
+            # -------------------------------------------------
+            # PLOTTING – ALWAYS RECTANGLES
+            # -------------------------------------------------
             fig = go.Figure()
+            
 
             for _, row in filtered_df.iterrows():
                 x = row["Global X"]
@@ -119,56 +119,46 @@ if uploaded_file:
                 L = row.get("Footing_L_mm")
                 B = row.get("Footing_B_mm")
 
+                # Use real or default footing size
+                if pd.isna(L) or pd.isna(B):
+                    L = DEFAULT_FOOTING_L
+                    B = DEFAULT_FOOTING_B
+
                 # Footing rectangle
-                if footing_available and pd.notna(L) and pd.notna(B):
-                    fig.add_shape(
-                        type="rect",
-                        x0=x - L / 2,
-                        x1=x + L / 2,
-                        y0=y - B / 2,
-                        y1=y + B / 2,
-                        fillcolor="rgba(255,0,0,0.4)",
-                        line=dict(color="black", width=1)
-                    )
+                fig.add_shape(
+                    type="rect",
+                    x0=x - L / 2,
+                    x1=x + L / 2,
+                    y0=y - B / 2,
+                    y1=y + B / 2,
+                    fillcolor="rgba(255,0,0,0.4)",
+                    line=dict(color="black", width=2)
+                )
 
-                    fig.add_trace(go.Scatter(
-                        x=[x],
-                        y=[y],
-                        mode="text",
-                        text=[f"{fz:.1f} kN"],
-                        textposition="middle center",
-                        showlegend=False
-                    ))
+                # Reaction value inside footing
+                fig.add_trace(go.Scatter(
+                    x=[x],
+                    y=[y],
+                    mode="text",
+                    text=[f"{fz:.1f} kN"],
+                    textposition="middle center",
+                    showlegend=False
+                ))
 
-                # Joint marker fallback
-                else:
-                    fig.add_trace(go.Scatter(
-                        x=[x],
-                        y=[y],
-                        mode="markers+text",
-                        marker=dict(
-                            size=16,
-                            color=fz,
-                            colorscale="RdYlGn_r",
-                            showscale=True
-                        ),
-                        text=[f"{fz:.1f}"],
-                        textposition="top right",
-                        showlegend=False
-                    ))
+                
 
-            # ---------------------------------
+            # -------------------------------------------------
             # LAYOUT & AXES
-            # ---------------------------------
+            # -------------------------------------------------
             fig.update_layout(
-                title=f"Heatmap for Output Case: {selected_load_combo}",
+                title=f"Footing Reaction Layout – {selected_load_combo}",
                 xaxis_title="X (m)",
                 yaxis_title="Y (m)",
                 plot_bgcolor="rgba(0,0,0,0)",
                 yaxis=dict(scaleanchor="x", scaleratio=1)
             )
 
-            # mm → m axis display
+            # Axis labels in meters (mm → m)
             fig.update_xaxes(
                 ticktext=[f"{x/1000:.3f}" for x in filtered_df["Global X"]],
                 tickvals=filtered_df["Global X"]
@@ -181,9 +171,9 @@ if uploaded_file:
 
             st.plotly_chart(fig, use_container_width=True)
 
-            # ---------------------------------
+            # -------------------------------------------------
             # DATA PREVIEW
-            # ---------------------------------
+            # -------------------------------------------------
             with st.expander("Show processed data"):
                 st.dataframe(filtered_df)
 
