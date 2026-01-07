@@ -13,15 +13,16 @@ st.set_page_config(
 
 st.title("ETABS Pad Foundation Designer")
 st.markdown("""
-This app performs **preliminary pad foundation sizing** using ETABS column reactions.
+This app performs **preliminary pad foundation sizing** from ETABS joint reactions  
+(similar to **VIKTOR – Pad Foundations**).
 
 ### Workflow
-1. Upload ETABS exported Excel file  
+1. Upload ETABS exported Excel  
 2. Select load combination  
 3. Enter allowable bearing capacity  
 4. View pad foundation layout  
 
-### Required Excel sheets
+### Required ETABS sheets
 - **Joint Reactions**
 - **Objects and Elements - Joints**
 
@@ -89,7 +90,20 @@ if uploaded_file:
         if selected_load_combo:
             filtered_df = merged_df[
                 merged_df["Output Case"] == selected_load_combo
-            ]
+            ].copy()
+
+            # -------------------------------------------------
+            # 🔥 IMPORTANT FIX
+            # ONE FOOTING PER COLUMN (governing load)
+            # -------------------------------------------------
+            filtered_df["FZ_comp"] = filtered_df["FZ"].abs()
+
+            filtered_df = (
+                filtered_df
+                .sort_values("FZ_comp", ascending=False)
+                .groupby("Unique Name", as_index=False)
+                .first()
+            )
 
             st.subheader("Pad Foundation Layout")
 
@@ -101,27 +115,26 @@ if uploaded_file:
             for _, row in filtered_df.iterrows():
                 x = row["Global X"]
                 y = row["Global Y"]
-                fz = abs(row["FZ"])  # Compression only
+                fz = row["FZ_comp"]  # governing compression (kN)
 
-                # ---- DESIGN LOGIC ----
-                # Required area (m²)
+                # ---- FOOTING DESIGN ----
                 area_m2 = fz / bearing_capacity
-
-                # Square footing
                 side_m = math.sqrt(area_m2)
-                side_m = max(side_m, 1.0)  # minimum 1.0 m footing
+
+                # Minimum footing size (engineering practice)
+                side_m = max(side_m, 1.0)
 
                 L = side_m * 1000  # mm
                 B = side_m * 1000  # mm
 
-                # Footing rectangle
+                # Pad rectangle
                 fig.add_shape(
                     type="rect",
                     x0=x - L / 2,
                     x1=x + L / 2,
                     y0=y - B / 2,
                     y1=y + B / 2,
-                    fillcolor="rgba(210,210,210,0.9)",
+                    fillcolor="rgba(210,210,210,0.95)",
                     line=dict(color="black", width=2)
                 )
 
@@ -146,7 +159,7 @@ if uploaded_file:
                 yaxis=dict(scaleanchor="x", scaleratio=1)
             )
 
-            # Axis labels in meters
+            # mm → m axis display
             fig.update_xaxes(
                 ticktext=[f"{x/1000:.2f}" for x in filtered_df["Global X"]],
                 tickvals=filtered_df["Global X"]
@@ -160,11 +173,11 @@ if uploaded_file:
             st.plotly_chart(fig, use_container_width=True)
 
             # -------------------------------------------------
-            # DATA TABLE
+            # CALCULATION TABLE
             # -------------------------------------------------
             with st.expander("Show Calculation Table"):
                 table_df = filtered_df.copy()
-                table_df["FZ (kN)"] = table_df["FZ"].abs()
+                table_df["FZ (kN)"] = table_df["FZ_comp"]
                 table_df["Required Area (m²)"] = table_df["FZ (kN)"] / bearing_capacity
                 table_df["Footing Size (m)"] = table_df["Required Area (m²)"].apply(
                     lambda a: round(math.sqrt(a), 2)
