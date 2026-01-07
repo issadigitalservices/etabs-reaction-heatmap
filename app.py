@@ -24,38 +24,48 @@ Units expected:
 # PROCESS ETABS FILE (same logic)
 # -------------------------------
 def process_etabs_file(uploaded_file):
-    sheet_names = [
-        "Joint Reactions",
-        "Objects and Elements - Joints",
-        "Footing Sizes"   # 👈 NEW
-    ]
+    xls = pd.ExcelFile(uploaded_file)
+    available_sheets = xls.sheet_names
 
-    dataframes = pd.read_excel(
+    loads_df = pd.read_excel(
         uploaded_file,
-        sheet_name=sheet_names,
+        sheet_name="Joint Reactions",
         skiprows=1
     )
 
-    loads_df = dataframes["Joint Reactions"].dropna(
-        subset=["Unique Name", "Output Case"]
-    ).copy()
-
-    coords_df = dataframes["Objects and Elements - Joints"].dropna(
-        subset=["Element Name", "Object Name", "Global X", "Global Y"]
-    ).copy()
+    coords_df = pd.read_excel(
+        uploaded_file,
+        sheet_name="Objects and Elements - Joints",
+        skiprows=1
+    )
 
     coords_df = coords_df.rename(columns={
         "Object Name": "Unique Name"
     })
 
-    footing_df = dataframes["Footing Sizes"].copy()
+    merged_df = loads_df.merge(coords_df, on="Unique Name", how="inner")
 
-    merged_df = loads_df.merge(coords_df, on="Unique Name")
-    merged_df = merged_df.merge(footing_df, on="Unique Name", how="left")
+    # ✅ OPTIONAL Footing Sizes
+    if "Footing Sizes" in available_sheets:
+        footing_df = pd.read_excel(
+            uploaded_file,
+            sheet_name="Footing Sizes"
+        )
+        merged_df = merged_df.merge(
+            footing_df,
+            on="Unique Name",
+            how="left"
+        )
+        footing_available = True
+    else:
+        footing_available = False
+        merged_df["Footing_L_mm"] = None
+        merged_df["Footing_B_mm"] = None
 
     load_combos = merged_df["Output Case"].unique().tolist()
 
-    return load_combos, merged_df.reset_index(drop=True)
+    return load_combos, merged_df.reset_index(drop=True), footing_available
+
 
 
 
@@ -69,7 +79,8 @@ uploaded_file = st.file_uploader(
 
 if uploaded_file:
     try:
-        load_combos, merged_df = process_etabs_file(uploaded_file)
+        load_combos, merged_df, footing_available = process_etabs_file(uploaded_file)
+
 
         # -------------------------------
         # LOAD COMBO SELECT (OptionField)
@@ -90,54 +101,50 @@ if uploaded_file:
             # -------------------------------
             # PLOTLY HEATMAP (same as VIKTOR)
             # -------------------------------
-            fig = go.Figure(
-                data=go.Scatter(
-                    x=filtered_df["Global X"],
-                    y=filtered_df["Global Y"],
-                    mode="markers+text",
-                    marker=dict(
-                        size=16,
-                        color=filtered_df["FZ"],
-                        colorscale=[
-                            [0, "green"],
-                            [0.5, "yellow"],
-                            [1, "red"]
-                        ],
-                        colorbar=dict(title="FZ (kN)"),
-                        cmin=FZ_min,
-                        cmax=FZ_max
-                    ),
-                    text=[f"{fz:.1f}" for fz in filtered_df["FZ"]],
-                    textposition="top right"
-                )
-            )
+            fig = go.Figure()
 
-            fig.update_layout(
-                title=f"Heatmap for Output Case: {selected_load_combo}",
-                xaxis_title="X (m)",
-                yaxis_title="Y (m)",
-                plot_bgcolor="rgba(0,0,0,0)"
-            )
+for _, row in filtered_df.iterrows():
+    x = row["Global X"]
+    y = row["Global Y"]
+    fz = row["FZ"]
 
-            fig.update_xaxes(
-                linecolor="LightGrey",
-                ticktext=[f"{x/1000:.3f}" for x in filtered_df["Global X"]],
-                tickvals=filtered_df["Global X"]
-            )
+    L = row.get("Footing_L_mm")
+    B = row.get("Footing_B_mm")
 
-            fig.update_yaxes(
-                linecolor="LightGrey",
-                ticktext=[f"{y/1000:.3f}" for y in filtered_df["Global Y"]],
-                tickvals=filtered_df["Global Y"]
-            )
+    if footing_available and pd.notna(L) and pd.notna(B):
+        # ✅ Draw footing rectangle
+        fig.add_shape(
+            type="rect",
+            x0=x - L / 2,
+            x1=x + L / 2,
+            y0=y - B / 2,
+            y1=y + B / 2,
+            fillcolor="rgba(255,0,0,0.4)",
+            line=dict(color="black", width=1)
+        )
 
-            st.plotly_chart(fig, use_container_width=True)
+        fig.add_trace(go.Scatter(
+            x=[x],
+            y=[y],
+            mode="text",
+            text=[f"{fz:.1f} kN"],
+            textposition="middle center",
+            showlegend=False
+        ))
+    else:
+        # ✅ Fallback marker
+        fig.add_trace(go.Scatter(
+            x=[x],
+            y=[y],
+            mode="markers+text",
+            marker=dict(
+                size=16,
+                color=fz,
+                colorscale="RdYlGn_r",
+                showscale=True
+            ),
+            text=[f"{fz:.1f}"],
+            textposition="top right",
+            showlegend=False
+        ))
 
-            # Optional data preview
-            with st.expander("Show processed data"):
-                st.dataframe(filtered_df)
-
-    except Exception as e:
-        st.error(f"Error processing file: {e}")
-else:
-    st.info("Please upload an ETABS exported Excel file to begin.")
